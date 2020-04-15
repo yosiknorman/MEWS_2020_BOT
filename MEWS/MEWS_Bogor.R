@@ -1,0 +1,294 @@
+#!/usr/bin/Rscript
+library(ncdf4)
+library(raster)
+library(shiny)
+library(leaflet)
+library(rgdal)
+library(parallel)
+library(doParallel)
+library(stringr)
+
+rm(list = ls())
+is.character0 <- function(x){
+  is.character(x) && length(x) == 0L
+}
+is.integer0 <- function(x){
+  is.integer(x) && length(x) == 0L
+} 
+ZONA_WAKTU = "WIB"
+WhoAreYou = "Prakirawan BMKG - Jawa Barat"
+PERSEN_AREA = 0.1
+
+INPUT_WAKTU = TRUE
+NAMA_WAKTU = "01-01-2020 03:00"
+LSF = list.files("../data/nc/", pattern = "nc")
+if(INPUT_WAKTU){
+  PAT = paste0(substr(NAMA_WAKTU, 7, 10),
+               substr(NAMA_WAKTU, 4, 5),
+               substr(NAMA_WAKTU, 1, 2), 
+               substr(NAMA_WAKTU, 12, 13),
+               substr(NAMA_WAKTU, 15, 16))
+  LAST = grep(LSF, pattern = PAT)
+}else{
+  LAST = length(LSF)
+}
+START = LAST-1
+
+
+IR = raster(paste0("../data/nc/", LSF[LAST]))
+IR_st = raster(paste0("../data/nc/", LSF[START]))
+IR_int = IR - IR_st
+
+# plot(IR_int)
+load("~/Data_riset/kec2.Rda")
+UPP = unique(kec@data$Provinsi)
+kec = kec[-which(kec$Provinsi == UPP[length(UPP)]),]
+UPP = UPP[-length(UPP)]
+Per_Prov = function(iProv){
+  Prov = UPP[iProv]
+  kec_P = kec[kec$Provinsi %in% Prov,]
+  BOX = raster()
+  extent(BOX) = extent(kec_P)
+  BOX@extent@xmin = BOX@extent@xmin-3
+  BOX@extent@xmax = BOX@extent@xmax+3
+  BOX@extent@ymin = BOX@extent@ymin-3
+  BOX@extent@ymax = BOX@extent@ymax+3
+  IR_P = crop(IR, BOX)
+  IR_int_P = crop(IR_int, BOX)
+  RES = list(  kec_P,  IR_P , IR_int_P)
+  names(RES) = c(paste(UPP[iProv]), "IR" , "IR_int")
+  return(RES)
+}
+
+iProv = 5
+# unique(kec$Provinsi)[5]
+PreProc = Per_Prov(iProv)
+NM_PROV = names(PreProc)[1]
+# plot(PreProc$IR )
+# plot(PreProc$`JAWA BARAT`, add = T)
+EXIST = function(PARA){
+  res = min(as.matrix(raster::mask(PreProc$IR, PreProc[[1]][PARA,])), na.rm = T)
+  return(res)
+}
+# PreProc = Per_Prov(iProv)
+EXIST_Penurunan = function(PARA){
+  res = c(as.matrix(raster::mask(PreProc$IR_int, PreProc[[1]][PARA,])))
+  res = res[!is.na(res)]
+  res = (length(which(res < 0))/length(res))*100
+  return(res)
+}
+Juml_Kec = PreProc[[1]]$Kabupaten
+U_KB = as.character(unique(PreProc[[1]]$Kabupaten))
+UTB_KB = table(as.character(PreProc[[1]]$Kabupaten))
+Kab_DT =  data.frame( Kab = names(UTB_KB), Jumlah = as.numeric(UTB_KB), stringsAsFactors = F)
+# for(i in 1:length())
+
+
+# EXIST(7)
+# EXIST_Kenaikan(7)
+minimal_LAST = c()
+Penurunan_T = c()
+for(i in 1:length(PreProc[[1]])){
+  minimal_LAST[i] = EXIST(i)
+  Penurunan_T[i] = EXIST_Penurunan(i)
+}
+PreProc[[1]] = PreProc[[1]][-which(minimal_LAST == Inf),]
+minimal_LAST = round(minimal_LAST[-which(minimal_LAST == Inf)], 1)
+Penurunan_T = round(Penurunan_T[-which(is.na(Penurunan_T) )],1)
+# which(minimal_LAST <= 210 & Penurunan_T < 0)
+hasil = c()
+for(i in 1:length(minimal_LAST)){
+  if(minimal_LAST[i] <= 240){
+    if(Penurunan_T[i] > 50){
+      hasil[i] = minimal_LAST[i]
+    }else{
+      hasil[i] = paste0(minimal_LAST[i], " Naik ", Penurunan_T[i])
+    }
+  }else{
+    hasil[i] = "No Warning"
+  }
+}
+
+
+PreProc[[1]]@data = data.frame(PreProc[[1]]@data, WARNING = hasil)
+
+INIT = hasil
+# INIT_WARNING = 
+if(any(INIT != "No Warning")){
+  # Inti
+  HL = INIT[-(which(INIT == "No Warning"))]
+  HL_BU = HL
+  HL = (HL[-grep(HL, pattern = " Naik ")])
+  HL_Only = PreProc[[1]][which(PreProc[[1]]@data$WARNING %in% HL),]
+  
+  # HL_TRACK(HL_Only)
+  # *meluas*
+  HL2 = (HL_BU[grep(HL_BU, pattern = " Naik ")])
+  HL2_Only = PreProc[[1]][which(PreProc[[1]]@data$WARNING %in% HL2),]
+  
+  # HL1 = HL_TRACK(HL_Only)
+  # HL_TRACK2(HL2_Only, Jangan = HL1[[2]])
+  # Jangan =
+  
+  # HL_TRACK(HL_Only )
+  # HL_TRACK2(HL2_Only , Jangan)
+  HL_TRACK = function(HL_Only){
+    JKec = as.character(HL_Only$Kecamatan)
+    JKab = as.character(HL_Only$Kabupaten)
+    JPrv = as.character(HL_Only$Provinsi)
+    D1 = data.frame(Kab = as.character(names(table(JKab))), 
+                    Jumlah = as.character((table(JKab))))
+    DT_ALL = data.frame(JKec, JKab, JPrv, stringsAsFactors = F)
+    D1 =  cbind(D1, Proporsi = as.numeric(D1$Jumlah) /  as.numeric(Kab_DT$Jumlah[Kab_DT$Kab %in% D1$Kab]))
+    WARN_ALL_HL = ""
+    if(any(D1$Proporsi > PERSEN_AREA)){
+      WARN_ALL_HL = paste(D1$Kab[D1$Proporsi > PERSEN_AREA], collapse = ", ")
+      Jangan = as.character(D1$Kab[D1$Proporsi > PERSEN_AREA])
+      # WARN_ALL_HL_BU = WARN_ALL_HL
+      Kurang = which(D1$Proporsi <= PERSEN_AREA)
+      D1 = D1[Kurang, ]
+      DT_ALL = DT_ALL[(DT_ALL$JKab %in% as.character(D1$Kab)), ]
+      # WARN_ALL_HL = gsub(WARN_ALL_HL, pattern = "KAB. ",replacement = "")
+      # WARN_ALL_HL = gsub(WARN_ALL_HL, pattern = "KOTA ",replacement = "")
+      WARN_ALL_HL = str_to_title(WARN_ALL_HL)
+      WARN_ALL_HL = paste0(" keseluruh wilayah *", WARN_ALL_HL, "* \ndan ")
+    }else{
+      Jangan = NA
+      WARN_ALL_HL = ""
+    }
+    
+    KB_er = unique(DT_ALL$JKab)
+    Text_Kec_HL = c()
+    for(i in 1:length(KB_er)){
+      Pil = DT_ALL[DT_ALL$JKab ==  KB_er[i], ]
+      Text_Kec_HL[i] =  paste0("*" ,unique(Pil$JKab), "* (", 
+                               paste(unique(Pil$JKec), collapse = ", "), 
+                               ")"
+      ) 
+    }
+    Text_Kec_HL = paste(Text_Kec_HL, collapse = ", ")
+    # Text_Kec_HL = gsub(Text_Kec_HL, pattern = "KAB. ",replacement = "")
+    # Text_Kec_HL = gsub(Text_Kec_HL, pattern = "KOTA ",replacement = "")
+    Text_Kec_HL = str_to_title(Text_Kec_HL)
+    TEXT_HL = paste(WARN_ALL_HL, "beberapa wilayah seperti : \n",
+                    Text_Kec_HL )
+    return(list(TEXT_HL, Jangan))
+    # return((TEXT_HL))
+  }
+  
+  HL_TRACK2 = function(HL2_Only,   Jangan){
+    # Jangan = HL_Only2[[2]]
+    if(!is.character0(Jangan)){
+      if(any(HL2_Only$Kabupaten %in% Jangan)){
+        HL2_Only = HL2_Only[-(HL2_Only$Kabupaten %in% Jangan),] 
+      }
+    }
+    JKec = as.character(HL2_Only$Kecamatan)
+    JKab = as.character(HL2_Only$Kabupaten)
+    JPrv = as.character(HL2_Only$Provinsi)
+    D1 = data.frame(Kab = as.character(names(table(JKab))), 
+                    Jumlah = as.character((table(JKab))))
+    DT_ALL = data.frame(JKec, JKab, JPrv, stringsAsFactors = F)
+    D1 =  cbind(D1, Proporsi = as.numeric(D1$Jumlah) /  as.numeric(Kab_DT$Jumlah[Kab_DT$Kab %in% D1$Kab]))
+    WARN_ALL_HL = ""
+    if(any(D1$Proporsi > PERSEN_AREA)){
+      WARN_ALL_HL = paste(D1$Kab[D1$Proporsi > PERSEN_AREA], collapse = ", ")
+      # Jangan = as.character(D1$Kab[D1$Proporsi > 0.5])
+      # WARN_ALL_HL_BU = WARN_ALL_HL
+      Kurang = which(D1$Proporsi <= PERSEN_AREA)
+      D1 = D1[Kurang, ]
+      # WARN_ALL_HL = gsub(WARN_ALL_HL, pattern = "KAB. ",replacement = "")
+      # WARN_ALL_HL = gsub(WARN_ALL_HL, pattern = "KOTA ",replacement = "")
+      WARN_ALL_HL = str_to_title(WARN_ALL_HL)
+      WARN_ALL_HL = paste0(" keseluruh wilayah *", WARN_ALL_HL, "* \ndan ")
+    }
+    DT_ALL = DT_ALL[(DT_ALL$JKab %in% as.character(D1$Kab)), ]
+    
+    KB_er = unique(DT_ALL$JKab)
+    Text_Kec_HL = c()
+    for(i in 1:length(KB_er)){
+      Pil = DT_ALL[DT_ALL$JKab ==  KB_er[i], ]
+      Text_Kec_HL[i] =  paste0("*" ,unique(Pil$JKab), "* (", 
+                               paste(unique(Pil$JKec), collapse = ", "), 
+                               ") "
+      ) 
+      
+    }
+    Text_Kec_HL = paste(Text_Kec_HL, collapse = ", ")
+    # Text_Kec_HL = gsub(Text_Kec_HL, pattern = "KAB. ",replacement = "")
+    # Text_Kec_HL = gsub(Text_Kec_HL, pattern = "KOTA ",replacement = "")
+    Text_Kec_HL = str_to_title(Text_Kec_HL)
+    TEXT_HL = paste0(WARN_ALL_HL, "beberapa wilayah seperti : \n",
+                     Text_Kec_HL )
+    return(TEXT_HL)
+  }
+  HL_Only2 = HL_TRACK(HL_Only)
+  Meluas2 = HL_TRACK2(HL2_Only, Jangan = HL_Only2[[2]])
+  ALL = paste0(HL_Only2[[1]], " \n dan dapat *meluas*", Meluas2)
+  # system("mkdir ../data/WARNING")
+  PP = as.character(UPP[iProv])
+  PP = gsub(PP, pattern = " ", replacement = "_")
+  write(ALL, file = paste0("../data/WARNING/Warning_",   
+                           substr(LSF[LAST], 1, nchar(LSF[LAST])-3), "_",PP, ".txt")
+  )
+}else{
+  ALL = "No Warning"
+}
+
+if(ALL == "No Warning"){
+  TEXT = "No Warning"
+}else{
+  WAKTU_RELEASE = as.POSIXct(paste0(paste(rev(strsplit(substr(NAMA_WAKTU, 1, 10), split = "-")[[1]]), collapse = "-"), 
+                                    " ", substr(NAMA_WAKTU, 12, 16))) + (10*60)
+  WAKTU_START = WAKTU_RELEASE + (30*60)
+  WAKTU_FNISH = WAKTU_START + (3*60*60)
+  WAKTU_RELEASE = as.character(WAKTU_RELEASE)
+  WAKTU_START = as.character(WAKTU_START)
+  WAKTU_FNISH = as.character(WAKTU_FNISH)
+  BUL_ABB = c("Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
+              "Jul", "Agu", "Sep", "Okt", "Nov", "Des")
+  DMY_RELEASE = paste0( as.integer(substr(WAKTU_RELEASE, 9,10)),
+                        " ",  BUL_ABB[as.integer(substr(WAKTU_RELEASE, 6, 7))], 
+                        " ", as.integer(substr(WAKTU_RELEASE, 1,4)))
+  
+  DMY_START = paste0( as.integer(substr(WAKTU_START, 9,10)),
+                      " ",  BUL_ABB[as.integer(substr(WAKTU_START, 6, 7))], 
+                      " ", as.integer(substr(WAKTU_START, 1,4)))
+  
+  DMY_FNISH = paste0( as.integer(substr(WAKTU_FNISH, 9,10)),
+                      " ",  BUL_ABB[as.integer(substr(WAKTU_FNISH, 6, 7))], 
+                      " ", as.integer(substr(WAKTU_FNISH, 1,4)))
+  if(DMY_RELEASE == DMY_START){
+    DMY_START1 = paste0("Pkl. ", substr(WAKTU_START, 12, 16), " ", ZONA_WAKTU)
+  }else{
+    DMY_START1 = paste0(DMY_START, " Pkl. ", substr(WAKTU_START, 12, 16), " ", ZONA_WAKTU)
+  }
+  
+  if(DMY_START == DMY_FNISH){
+    DMY_FNISH1 = paste0("Pkl. ", substr(WAKTU_FNISH, 12, 16), " ", ZONA_WAKTU)
+  }else{
+    DMY_FNISH1 = paste0(DMY_FNISH, " Pkl. ", substr(WAKTU_FNISH, 12, 16), " ", ZONA_WAKTU)
+  }
+  DMY_RELEASE1 = paste0(DMY_RELEASE, " Pkl. ", substr(WAKTU_RELEASE, 12, 16), " ", ZONA_WAKTU)
+  
+  
+  TEXT = paste0("*Peringatan Dini Cuaca ",str_to_title(NM_PROV),"* Tgl. ",DMY_RELEASE1,  
+                ". \nBerpotensi Hujan lebat disertai Kilat/Petir dan Angin kencang pada ",
+                DMY_START1, ". Di", ALL , ". Kondisi ini diperkirakan berlangsung hingga ", DMY_FNISH1, 
+                "\n\n*", WhoAreYou, "* \nhttp://bmkg.go.id")
+}
+Name_File = gsub(WAKTU_RELEASE, pattern = " ", replacement = "_")
+if(!is.integer0(grep(TEXT, pattern = "Kab. "))){
+  TEXT = gsub(TEXT, pattern = "Kab. ", replacement = "")
+}
+if(TEXT != "No Warning"){
+  TEXT_Bersih = gsub(TEXT, pattern = "\\*", replacement = "")
+  if(!is.integer0(grep(TEXT_Bersih, pattern = "meluas keseluruh wilayah"))){
+    TEXT = gsub(TEXT, pattern = "dan beberapa wilayah seperti", replacement = "serta beberapa wilayah seperti")
+  }
+}
+
+write(TEXT, file = paste0("arsip/", Name_File, ".txt"))
+# system("mkdir arsip")
+# "gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/screen -dNOPAUSE -dQUIET -dBATCH -sOutputFile=output_Smaller.pdf Smaller.pdf"
+# leaflet() %>% addPolygons(data = PreProc[[1]], label = as.character(PreProc[[1]]$Kecamatan), weight = 1)
